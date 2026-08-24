@@ -20,6 +20,7 @@ from std.math import (
     tanh,
 )
 from std.sys.info import num_physical_cores, simd_width_of as simdwidthof
+from max.algorithm import parallelize
 
 comptime F64Ptr = Pointer[Float64, AnyOrigin[mut=True]]
 comptime I64Ptr = Pointer[Int64, AnyOrigin[mut=True]]
@@ -448,9 +449,8 @@ def mmup_evaluate_f64(
                 )[0]
             i += 1
 
-    # Parallel execution moved to the separately packaged MAX library in
-    # Mojo 1.1. Retain the standalone Mojo dependency and evaluate the same
-    # partitions synchronously.
-    for worker in range(workers):
-        process(worker)
+    if workers == 1:
+        process(0)
+    else:
+        parallelize[process](workers, workers)
     return 0

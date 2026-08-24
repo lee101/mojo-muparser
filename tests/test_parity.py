@@ -113,6 +113,23 @@ def test_expression_cost_parallel_threshold(size):
     assert np.allclose(actual, expected, rtol=4e-12, atol=4e-12)
 
 
+def test_parallel_path_matches_serial_with_simd_tail():
+    size = 384_619
+    rng = np.random.default_rng(23)
+    values = {
+        "a": rng.uniform(0.2, 1.2, size),
+        "b": rng.uniform(1.1, 2.0, size),
+        "c": rng.uniform(-0.8, 0.8, size),
+    }
+    parser = mojo.Parser()
+    for name, value in values.items():
+        parser.define_var(name, value)
+    parser.set_expr("a+b*c+a*a-b*b+c*c*0.25")
+    parallel = parser.eval(workers=4)
+    serial = parser.eval(workers=1)
+    assert np.array_equal(parallel, serial)
+
+
 def test_bulk_assignment_and_sequence_parity(upstream):
     values = {
         "a": np.arange(1.0, 9.0),

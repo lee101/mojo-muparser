@@ -59,8 +59,8 @@ shape, and writability requirements.
 
 ## Install
 
-The repository pins the tested Mojo nightly. Pixi installs Mojo, NumPy, pytest, and
-the real muparser library used by tests and benchmarks.
+The repository pins the tested Mojo and MAX nightlies. Pixi installs them with
+NumPy, pytest, and the real muparser library used by tests and benchmarks.
 
 ```bash
 pixi install
@@ -119,16 +119,19 @@ time divided by mojo-muparser time.
 
 | expression | mojo-muparser | muparser | ratio |
 | --- | ---: | ---: | ---: |
-| multiply-add | 13.20 ms | 47.04 ms | 3.56x faster |
-| 8-op polynomial | 24.69 ms | 87.82 ms | 3.56x faster |
-| transcendental | 41.61 ms | 154.40 ms | 3.71x faster |
-| conditional | 11.65 ms | 39.38 ms | 3.38x faster |
-| variadic | 22.80 ms | 75.27 ms | 3.30x faster |
+| multiply-add | 12.24 ms | 40.05 ms | 3.27x faster |
+| 8-op polynomial | 18.59 ms | 57.38 ms | 3.09x faster |
+| transcendental | 35.49 ms | 140.69 ms | 3.96x faster |
+| conditional | 11.24 ms | 41.84 ms | 3.72x faster |
+| variadic | 19.75 ms | 73.81 ms | 3.74x faster |
 
 These are single-machine microbenchmarks, not general performance claims. The
 benchmark validates each result against muparser before timing.
 
-No GPU path is included.
+No GPU path is included. The transcendental kernel has enough arithmetic intensity
+to be a candidate, but the pinned Mojo/MAX NVIDIA backend does not support its
+`float64` cosine operation. Casting to `float32` would violate the existing parity
+tolerance, so CPU execution remains the only correctness-preserving path.
 
 ## How it works
 
