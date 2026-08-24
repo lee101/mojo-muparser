@@ -1,6 +1,5 @@
 """Fused SIMD evaluator for muparser-compatible bytecode."""
 
-from std.algorithm import parallelize
 from std.math import (
     abs,
     acos,
@@ -22,8 +21,8 @@ from std.math import (
 )
 from std.sys.info import num_physical_cores, simd_width_of as simdwidthof
 
-comptime F64Ptr = UnsafePointer[Float64, AnyOrigin[mut=True]]
-comptime I64Ptr = UnsafePointer[Int64, AnyOrigin[mut=True]]
+comptime F64Ptr = Pointer[Float64, AnyOrigin[mut=True]]
+comptime I64Ptr = Pointer[Int64, AnyOrigin[mut=True]]
 comptime W = simdwidthof[DType.float64]()
 comptime MAX_STACK = 64
 comptime PARALLEL_WORK = 5_000_000
@@ -37,7 +36,7 @@ def load_variable[width: Int](
     var source = F64Ptr(unsafe_from_address=Int(addresses[variable]))
     if strides[variable] == 0:
         return SIMD[DType.float64, width](source[0])
-    return source.load[width=width](index)
+    return source.unsafe_load[width=width](index)
 
 
 @always_inline
@@ -52,7 +51,7 @@ def store_variable[width: Int](
     if strides[variable] == 0:
         destination[0] = value[width - 1]
     else:
-        destination.store(index, value)
+        destination.unsafe_store(index, value)
 
 
 @always_inline
@@ -113,7 +112,7 @@ def execute_chunk[width: Int](
     strides: I64Ptr,
     index: Int,
 ) -> SIMD[DType.float64, width]:
-    var stack = InlineArray[SIMD[DType.float64, width], MAX_STACK](
+    var stack = Array[SIMD[DType.float64, width], MAX_STACK](
         uninitialized=True
     )
     var sp = 0
@@ -379,7 +378,7 @@ def mmup_evaluate_f64(
         workers = 1
     workers = max(workers, 1)
 
-    @parameter
+    @__parameter
     def process(worker: Int):
         var vectors = n // W
         var start = (worker * vectors // workers) * W
@@ -389,7 +388,7 @@ def mmup_evaluate_f64(
         var i = start
         while i + W <= end:
             if fast_path == 1:
-                destination.store(
+                destination.unsafe_store(
                     i,
                     execute_multiply_add[W](
                         addresses,
@@ -401,7 +400,7 @@ def mmup_evaluate_f64(
                     ),
                 )
             elif fast_path == 2:
-                destination.store(
+                destination.unsafe_store(
                     i,
                     execute_conditional_multiply_divide[W](
                         constants,
@@ -415,7 +414,7 @@ def mmup_evaluate_f64(
                     ),
                 )
             else:
-                destination.store(
+                destination.unsafe_store(
                     i,
                     execute_chunk[W](
                         code, code_count, constants, addresses, strides, i
@@ -449,8 +448,9 @@ def mmup_evaluate_f64(
                 )[0]
             i += 1
 
-    if workers > 1:
-        parallelize[process](workers, workers)
-    else:
-        process(0)
+    # Parallel execution moved to the separately packaged MAX library in
+    # Mojo 1.1. Retain the standalone Mojo dependency and evaluate the same
+    # partitions synchronously.
+    for worker in range(workers):
+        process(worker)
     return 0
