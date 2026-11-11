@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Callable
@@ -12,6 +13,7 @@ from typing import Any, Callable
 import numpy as np
 
 from ._lib import lib
+
 
 LE, GE, NE, EQ, LT, GT, ADD, SUB, MUL, DIV, POW, LAND, LOR, ASSIGN = range(14)
 VAR, VAL, VARPOW2, VARPOW3, VARPOW4, VARMUL = range(20, 26)
@@ -1032,6 +1034,68 @@ def _prepare_values(
     return prepared, shape or (), all_scalar
 
 
+_PARALLEL_WORK = 5_000_000
+_MIN_CHUNK = 1 << 15
+
+
+def _work_per_element(code: np.ndarray) -> int:
+    count = len(code)
+    work = count
+    for pc in range(count):
+        op = int(code[pc, 0])
+        argc = int(code[pc, 2])
+        if op == 10 or 40 <= op <= 58:
+            work += 16
+        elif op == 9 or op == 59:
+            work += 4
+        elif 63 <= op <= 66:
+            work += argc
+    return work
+
+
+def _evaluate_range(
+    evaluate: Any, arguments: tuple[int, ...], start: int, stop: int
+) -> int:
+    return int(evaluate(*arguments, start, stop))
+
+
+def _evaluate(
+    program: Program,
+    addresses: np.ndarray,
+    strides: np.ndarray,
+    destination: np.ndarray,
+    n: int,
+    workers: int,
+) -> None:
+    evaluate = lib().mmup_evaluate_range_f64
+    code = program.code
+    arguments = (
+        code.ctypes.data,
+        len(code),
+        program.constants.ctypes.data,
+        addresses.ctypes.data,
+        strides.ctypes.data,
+        destination.ctypes.data,
+    )
+    parts = workers if n * _work_per_element(code) >= _PARALLEL_WORK else 1
+    parts = min(parts, n // _MIN_CHUNK)
+    if parts < 2:
+        status = _evaluate_range(evaluate, arguments, 0, n)
+    else:
+        step = -(-n // parts)
+        ranges = [(part * step, min((part + 1) * step, n)) for part in range(parts)]
+        with ThreadPoolExecutor(max_workers=parts) as pool:
+            statuses = list(
+                pool.map(
+                    lambda bounds: _evaluate_range(evaluate, arguments, *bounds),
+                    ranges,
+                )
+            )
+        status = max(statuses)
+    if status:
+        raise RuntimeError(f"Mojo evaluator rejected bytecode (status {status})")
+
+
 def execute(
     program: Program,
     bindings: dict[str, Any],
@@ -1106,18 +1170,7 @@ def execute(
             )
         destination = out.reshape(-1)
     requested = workers if workers is not None else min(os.cpu_count() or 1, 16)
-    status = lib().mmup_evaluate_f64(
-        program.code.ctypes.data,
-        len(program.code),
-        program.constants.ctypes.data,
-        addresses.ctypes.data,
-        strides.ctypes.data,
-        destination.ctypes.data,
-        n,
-        requested,
-    )
-    if status:
-        raise RuntimeError(f"Mojo evaluator rejected bytecode (status {status})")
+    _evaluate(program, addresses, strides, destination, n, requested)
     if scalar:
         return float(destination[0])
     if out is not None:

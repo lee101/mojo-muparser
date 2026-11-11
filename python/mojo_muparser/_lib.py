@@ -37,6 +37,6 @@ def lib() -> ctypes.CDLL:
         if not os.path.exists(LIB):
             build()
         _library = ctypes.CDLL(LIB)
-        _library.mmup_evaluate_f64.argtypes = [I] * 8
-        _library.mmup_evaluate_f64.restype = I
+        _library.mmup_evaluate_range_f64.argtypes = [I] * 8
+        _library.mmup_evaluate_range_f64.restype = I
     return _library

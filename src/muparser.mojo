@@ -19,15 +19,12 @@ from std.math import (
     tan,
     tanh,
 )
-from std.sys.info import num_physical_cores, simd_width_of as simdwidthof
-from max.algorithm import parallelize
+from std.sys.info import simd_width_of as simdwidthof
 
 comptime F64Ptr = Pointer[Float64, AnyOrigin[mut=True]]
 comptime I64Ptr = Pointer[Int64, AnyOrigin[mut=True]]
 comptime W = simdwidthof[DType.float64]()
 comptime MAX_STACK = 64
-comptime PARALLEL_WORK = 5_000_000
-comptime FAST_PARALLEL_ELEMENTS = 4_000_000
 
 
 @always_inline
@@ -295,31 +292,8 @@ def execute_chunk[width: Int](
             stack[sp - 1] = stack[sp]
     return stack[0]
 
-@export("mmup_evaluate_f64")
-def mmup_evaluate_f64(
-    code_addr: Int,
-    code_count: Int,
-    constants_addr: Int,
-    addresses_addr: Int,
-    strides_addr: Int,
-    destination_addr: Int,
-    n: Int,
-    requested_workers: Int,
-) abi("C") -> Int:
-    if code_count < 1 or code_count > 256 or n < 0:
-        return 1
-    if n == 0:
-        return 0
-    var code = I64Ptr(unsafe_from_address=code_addr)
-    var constants = F64Ptr(unsafe_from_address=constants_addr)
-    var addresses = I64Ptr(unsafe_from_address=addresses_addr)
-    var strides = I64Ptr(unsafe_from_address=strides_addr)
-    var destination = F64Ptr(unsafe_from_address=destination_addr)
-    var fast_path = 0
-    var fast_a = 0
-    var fast_b = 0
-    var fast_c = 0
-    var fast_constant = 0
+
+def detect_fast_path(code: I64Ptr, code_count: Int) -> Int:
     if (
         code_count == 5
         and code[0] == 20
@@ -328,11 +302,8 @@ def mmup_evaluate_f64(
         and code[9] == 20
         and code[12] == 6
     ):
-        fast_path = 1
-        fast_a = Int(code[1])
-        fast_b = Int(code[4])
-        fast_c = Int(code[10])
-    elif (
+        return 1
+    if (
         code_count == 14
         and code[0] == 20
         and code[3] == 21
@@ -353,87 +324,47 @@ def mmup_evaluate_f64(
         and code[1] == code[19]
         and code[1] == code[34]
     ):
-        fast_path = 2
+        return 2
+    return 0
+
+
+def evaluate_range(
+    code: I64Ptr,
+    code_count: Int,
+    constants: F64Ptr,
+    addresses: I64Ptr,
+    strides: I64Ptr,
+    destination: F64Ptr,
+    start: Int,
+    stop: Int,
+):
+    var fast_path = detect_fast_path(code, code_count)
+    var fast_a = 0
+    var fast_b = 0
+    var fast_c = 0
+    var fast_constant = 0
+    if fast_path == 1:
+        fast_a = Int(code[1])
+        fast_b = Int(code[4])
+        fast_c = Int(code[10])
+    elif fast_path == 2:
         fast_c = Int(code[1])
         fast_constant = Int(code[4])
         fast_a = Int(code[10])
         fast_b = Int(code[13])
-    var workers = min(requested_workers, num_physical_cores())
-    var work_per_element = code_count
-    for pc in range(code_count):
-        var op = Int(code[pc * 3])
-        var argc = Int(code[pc * 3 + 2])
-        if op == 10 or (op >= 40 and op <= 58):
-            work_per_element += 16
-        elif op == 9 or op == 59:
-            work_per_element += 4
-        elif op >= 63 and op <= 66:
-            work_per_element += argc
-    if (
-        (fast_path > 0 and n < FAST_PARALLEL_ELEMENTS)
-        or (
-            fast_path == 0
-            and n < PARALLEL_WORK // max(work_per_element, 1)
-        )
-    ):
-        workers = 1
-    workers = max(workers, 1)
-
-    @__parameter
-    def process(worker: Int):
-        var vectors = n // W
-        var start = (worker * vectors // workers) * W
-        var end = ((worker + 1) * vectors // workers) * W
-        if worker == workers - 1:
-            end = n
-        var i = start
-        while i + W <= end:
-            if fast_path == 1:
-                destination.unsafe_store(
-                    i,
-                    execute_multiply_add[W](
-                        addresses,
-                        strides,
-                        fast_a,
-                        fast_b,
-                        fast_c,
-                        i,
-                    ),
-                )
-            elif fast_path == 2:
-                destination.unsafe_store(
-                    i,
-                    execute_conditional_multiply_divide[W](
-                        constants,
-                        addresses,
-                        strides,
-                        fast_a,
-                        fast_b,
-                        fast_c,
-                        fast_constant,
-                        i,
-                    ),
-                )
-            else:
-                destination.unsafe_store(
-                    i,
-                    execute_chunk[W](
-                        code, code_count, constants, addresses, strides, i
-                    ),
-                )
-            i += W
-        while i < end:
-            if fast_path == 1:
-                destination[i] = execute_multiply_add[1](
-                    addresses,
-                    strides,
-                    fast_a,
-                    fast_b,
-                    fast_c,
-                    i,
-                )[0]
-            elif fast_path == 2:
-                destination[i] = execute_conditional_multiply_divide[1](
+    var i = start
+    while i + W <= stop:
+        if fast_path == 1:
+            destination.unsafe_store(
+                i,
+                execute_multiply_add[W](
+                    addresses, strides, fast_a, fast_b, fast_c, i
+                ),
+            )
+        elif fast_path == 2:
+            destination.unsafe_store(
+                i,
+                execute_conditional_multiply_divide[W](
                     constants,
                     addresses,
                     strides,
@@ -442,15 +373,60 @@ def mmup_evaluate_f64(
                     fast_c,
                     fast_constant,
                     i,
-                )[0]
-            else:
-                destination[i] = execute_chunk[1](
+                ),
+            )
+        else:
+            destination.unsafe_store(
+                i,
+                execute_chunk[W](
                     code, code_count, constants, addresses, strides, i
-                )[0]
-            i += 1
+                ),
+            )
+        i += W
+    while i < stop:
+        if fast_path == 1:
+            destination[i] = execute_multiply_add[1](
+                addresses, strides, fast_a, fast_b, fast_c, i
+            )[0]
+        elif fast_path == 2:
+            destination[i] = execute_conditional_multiply_divide[1](
+                constants,
+                addresses,
+                strides,
+                fast_a,
+                fast_b,
+                fast_c,
+                fast_constant,
+                i,
+            )[0]
+        else:
+            destination[i] = execute_chunk[1](
+                code, code_count, constants, addresses, strides, i
+            )[0]
+        i += 1
 
-    if workers == 1:
-        process(0)
-    else:
-        parallelize[process](workers, workers)
+
+@export("mmup_evaluate_range_f64")
+def mmup_evaluate_range_f64(
+    code_addr: Int,
+    code_count: Int,
+    constants_addr: Int,
+    addresses_addr: Int,
+    strides_addr: Int,
+    destination_addr: Int,
+    start: Int,
+    stop: Int,
+) abi("C") -> Int:
+    if code_count < 1 or code_count > 256 or start < 0 or stop < start:
+        return 1
+    evaluate_range(
+        I64Ptr(unsafe_from_address=code_addr),
+        code_count,
+        F64Ptr(unsafe_from_address=constants_addr),
+        I64Ptr(unsafe_from_address=addresses_addr),
+        I64Ptr(unsafe_from_address=strides_addr),
+        F64Ptr(unsafe_from_address=destination_addr),
+        start,
+        stop,
+    )
     return 0
